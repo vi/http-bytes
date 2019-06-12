@@ -6,9 +6,12 @@
 //!
 //! Not performance-optimized
 
-pub extern crate http;
-pub extern crate httparse;
 extern crate bytes;
+pub extern crate http;
+extern crate httparse;
+
+#[cfg(feature = "basicauth")]
+extern crate base64;
 
 pub type Request = http::request::Request<()>;
 pub type Response = http::response::Response<()>;
@@ -23,6 +26,8 @@ pub enum Error {
     HeaderValue(http::header::InvalidHeaderValue),
     StatusCode(http::status::InvalidStatusCode),
     InvalidAuthority(http::uri::InvalidUriBytes),
+    #[cfg(feature = "basicauth")]
+    BasicAuth(base64::DecodeError),
 }
 
 impl std::fmt::Display for Error {
@@ -34,6 +39,8 @@ impl std::fmt::Display for Error {
             Error::HeaderValue(x) => x.fmt(f),
             Error::StatusCode(x) => x.fmt(f),
             Error::InvalidAuthority(x) => x.fmt(f),
+            #[cfg(feature = "basicauth")]
+            Error::BasicAuth(x) => x.fmt(f),
         }
     }
 }
@@ -46,14 +53,16 @@ impl std::error::Error for Error {
             Error::HeaderValue(x) => x,
             Error::StatusCode(x) => x,
             Error::InvalidAuthority(x) => x,
+            #[cfg(feature = "basicauth")]
+            Error::BasicAuth(x) => x,
         })
     }
 }
 
+use http::header::{HeaderName, HeaderValue, HOST};
+use http::uri::{Authority, Parts as UriParts, PathAndQuery};
+use http::{Method, StatusCode};
 use std::str::FromStr;
-use http::uri::{Parts as UriParts,PathAndQuery,Authority};
-use http::{Method,StatusCode};
-use http::header::{HeaderName,HeaderValue,HOST};
 
 /// Parse this byte buffer into a `Request` plus remaining trailing bytes.
 /// Returns `Ok(None)` if not enough bytes yet to produce a complete request.
@@ -72,19 +81,21 @@ pub fn parse_response_header_easy(buf: &[u8]) -> Result<Option<(Response, &[u8])
 }
 
 /// Parse this byte buffer into a `Request` plus remaining trailing bytes.
-/// 
+///
 /// Returns `Ok(None)` if not enough bytes yet to produce a complete request.
-/// 
+///
 /// If `scheme` is specified then information from `Host:`
-/// header is filled in into URL, if it exists. In case of no
-/// host header the URL would be scheme-less.
-/// 
-/// TODO: also fill in HTTP basic auth data if present in request
-pub fn parse_request_header<'a,'b>(
-    buf: &'a[u8],
+/// header is filled in into URI, if it exists. In case of no
+/// host header the URI would be scheme-less.
+///
+/// If default Cargo feature `basicauth` is enabled and
+/// `Authorization: Basic` HTTP header is found, it is also filled in
+/// into URI, if there is schema and host.
+pub fn parse_request_header<'a, 'b>(
+    buf: &'a [u8],
     headers_buffer: &'b mut [httparse::Header<'a>],
     scheme: Option<http::uri::Scheme>,
-) -> Result<Option<(Request, &'a[u8])>, Error> {
+) -> Result<Option<(Request, &'a [u8])>, Error> {
     let mut x = httparse::Request::new(headers_buffer);
     let n = match x.parse(buf).map_err(Error::Parse)? {
         httparse::Status::Partial => return Ok(None),
@@ -95,7 +106,7 @@ pub fn parse_request_header<'a,'b>(
     *r.method_mut() =
         Method::from_str(x.method.unwrap()).map_err(|_| Error::Parse(httparse::Error::Token))?;
     *r.version_mut() = http::Version::HTTP_11; // FIXME?
-    let mut up : UriParts = Default::default();
+    let mut up: UriParts = Default::default();
     up.path_and_query = Some(PathAndQuery::from_str(x.path.unwrap()).map_err(Error::Path)?);
 
     for h in x.headers {
@@ -106,8 +117,33 @@ pub fn parse_request_header<'a,'b>(
     if scheme.is_some() {
         if let Some(h) = r.headers().get(HOST) {
             up.scheme = scheme;
-            let a = bytes::Bytes::from(h.as_bytes());
-            let a = Authority::from_shared(a).map_err(Error::InvalidAuthority)?;
+            let authority_buf = bytes::Bytes::from(h.as_bytes());
+            #[allow(unused_mut)]
+            let mut authority_buf = authority_buf;
+            #[cfg(feature = "basicauth")]
+            {
+                use std::io::Write;
+                if let Some(u) = r.headers().get(http::header::AUTHORIZATION) {
+                    let u = u.as_bytes();
+                    let mut b = false;
+                    b |= u.starts_with(b"Basic ");
+                    b |= u.starts_with(b"basic ");
+                    b |= u.starts_with(b"BASIC ");
+                    if b && u.len() > 8 {
+                        let u = &u[6..];
+                        let u = base64::decode(u).map_err(Error::BasicAuth)?;
+                        // Prepend `user:password@` to variable `authbuf` above.
+                        // Without pulling in std::fmt preferrably
+                        let l = u.len();
+                        let mut u = std::io::Cursor::new(u);
+                        u.set_position(l as u64);
+                        u.write(b"@").unwrap();
+                        u.write_all(authority_buf.as_ref()).unwrap();
+                        authority_buf = bytes::Bytes::from(u.into_inner());
+                    }
+                }
+            }
+            let a = Authority::from_shared(authority_buf).map_err(Error::InvalidAuthority)?;
             up.authority = Some(a);
         }
     }
@@ -115,13 +151,12 @@ pub fn parse_request_header<'a,'b>(
     Ok(Some((r, trailer)))
 }
 
-
 /// Parse this byte buffer into a `Response` plus remaining trailing bytes.
 /// Returns `Ok(None)` if not enough bytes yet to produce a complete response.
-pub fn parse_response_header<'a,'b>(
-    buf: &'a[u8],
+pub fn parse_response_header<'a, 'b>(
+    buf: &'a [u8],
     headers_buffer: &'b mut [httparse::Header<'a>],
-) -> Result<Option<(Response, &'a[u8])>, Error> {
+) -> Result<Option<(Response, &'a [u8])>, Error> {
     let mut x = httparse::Response::new(headers_buffer);
     let n = match x.parse(buf).map_err(Error::Parse)? {
         httparse::Status::Partial => return Ok(None),
@@ -141,21 +176,31 @@ pub fn parse_response_header<'a,'b>(
 }
 
 fn io_other_error(msg: &'static str) -> std::io::Error {
-    let e : Box<dyn std::error::Error + Send + Sync + 'static> = msg.into();
+    let e: Box<dyn std::error::Error + Send + Sync + 'static> = msg.into();
     std::io::Error::new(std::io::ErrorKind::Other, e)
 }
 
 /// Write request line and headers (but not body) of this HTTP 1.1 request
 /// May add 'Host:' header automatically
 /// Returns number of bytes written
-/// 
+///
 /// It is recommended to use either BufWriter or Cursor for efficiency
-/// 
+///
 /// Scheme and version `Request` fields are ignored
-pub fn write_request_header<T>(r: &http::Request<T>, mut io: impl std::io::Write) -> std::io::Result<usize> {
+///
+/// If default Cargo feature `basicauth` is enabled and request contains
+/// username and password in URL then `Authorization: Basic` HTTP header is
+/// automatically added
+pub fn write_request_header<T>(
+    r: &http::Request<T>,
+    mut io: impl std::io::Write,
+) -> std::io::Result<usize> {
     let mut len = 0;
     let verb = r.method().as_str();
-    let path = r.uri().path_and_query().ok_or_else(||io_other_error("Invalid URI"))?;
+    let path = r
+        .uri()
+        .path_and_query()
+        .ok_or_else(|| io_other_error("Invalid URI"))?;
     let mut need_to_insert_host = r.uri().host().is_some();
     if r.headers().contains_key(HOST) {
         need_to_insert_host = false;
@@ -164,10 +209,10 @@ pub fn write_request_header<T>(r: &http::Request<T>, mut io: impl std::io::Write
         ($x:expr) => {
             io.write_all($x)?;
             len += $x.len();
-        }
+        };
     }
-    w!(verb.as_bytes()); 
-    w!(b" "); 
+    w!(verb.as_bytes());
+    w!(b" ");
     w!(path.as_str().as_bytes());
     w!(b" HTTP/1.1\r\n");
 
@@ -180,6 +225,18 @@ pub fn write_request_header<T>(r: &http::Request<T>, mut io: impl std::io::Write
             w!(p.as_str().as_bytes());
         }
         w!(b"\r\n");
+    }
+    #[cfg(feature = "basicauth")] {
+        let already_present = r.headers().get(http::header::AUTHORIZATION).is_some();
+        let at_sign = r.uri().authority_part().map_or(false, |x|x.as_str().contains('@'));
+        if !already_present && at_sign {
+            w!(b"Authorization: Basic ");
+            let a = r.uri().authority_part().unwrap().as_str();
+            let a = &a[0..(a.find('@').unwrap())];
+            let a = base64::encode(a);
+            w!(a.as_bytes());
+            w!(b"\r\n");
+        }
     }
 
     for (hn, hv) in r.headers() {
@@ -197,7 +254,7 @@ pub fn write_request_header<T>(r: &http::Request<T>, mut io: impl std::io::Write
 /// Easy version of `write_request_header`.
 /// See its doc for details
 /// Panics on problems
-pub fn request_header_to_vec(r:&Request) -> Vec<u8> {
+pub fn request_header_to_vec(r: &Request) -> Vec<u8> {
     let v = Vec::with_capacity(120);
     let mut c = std::io::Cursor::new(v);
     write_request_header(r, &mut c).unwrap();
@@ -215,12 +272,47 @@ User-Agent: none\r
 \r
 qwer";
         let (r, rest) = parse_request_header_easy(q).unwrap().unwrap();
+
         assert_eq!(rest, b"qwer");
+
         let v = request_header_to_vec(&r);
         let vv = String::from_utf8_lossy(&v[..]).to_lowercase();
-        assert_eq!(vv, "get / http/1.1\r
+        assert_eq!(
+            vv,
+            "get / http/1.1\r
 host: lol\r
 user-agent: none\r
-\r\n".as_ref());
+\r\n"
+                .as_ref()
+        );
+    }
+
+
+    #[test]
+    #[cfg(feature="basicauth")]
+    fn request_auth_roundtrip_autofill() {
+        let q = b"GET /Bernd HTTP/1.1\r
+Host: lol\r
+User-Agent: none\r
+Authorization: Basic Zm9vOmJhcg==\r
+\r
+qwer"; 
+        let mut h = [httparse::EMPTY_HEADER; 50];
+        let s = http::uri::Scheme::HTTP;
+        let (mut r, rest) = parse_request_header(q, &mut h, Some(s)).unwrap().unwrap();
+        assert_eq!(rest, b"qwer");
+
+        r.headers_mut().clear();
+
+        let v = request_header_to_vec(&r);
+        let vv = String::from_utf8_lossy(&v[..]).to_lowercase();
+        assert_eq!(
+            vv,
+            "get /bernd http/1.1\r
+host: lol\r
+authorization: basic zm9vomjhcg==\r
+\r\n"
+                .as_ref()
+        );
     }
 }
