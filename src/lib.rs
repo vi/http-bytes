@@ -251,13 +251,62 @@ pub fn write_request_header<T>(
     Ok(len)
 }
 
+/// Write response line and headers (but not body) of this HTTP 1.1 response
+/// 
+/// Returns number of bytes written
+///
+/// It is recommended to use either BufWriter or Cursor for efficiency
+pub fn write_response_header<T>(
+    r: &http::Response<T>,
+    mut io: impl std::io::Write,
+) -> std::io::Result<usize> {
+    let mut len = 0;
+    macro_rules! w {
+        ($x:expr) => {
+            io.write_all($x)?;
+            len += $x.len();
+        };
+    }
+
+    let status = r.status();
+    let code = status.as_str();
+    let reason = status.canonical_reason().unwrap_or("Unknown");
+    let headers = r.headers();
+
+    w!(b"HTTP/1.1 ");
+    w!(code.as_bytes());
+    w!(b" ");
+    w!(reason.as_bytes());
+    w!(b"\r\n");
+
+    for (hn, hv) in headers {
+        w!(hn.as_str().as_bytes());
+        w!(b": ");
+        w!(hv.as_bytes());
+        w!(b"\r\n");
+    }
+
+    w!(b"\r\n");
+    Ok(len)
+}
+
 /// Easy version of `write_request_header`.
 /// See its doc for details
 /// Panics on problems
-pub fn request_header_to_vec(r: &Request) -> Vec<u8> {
+pub fn request_header_to_vec<T>(r: &http::Request<T>) -> Vec<u8> {
     let v = Vec::with_capacity(120);
     let mut c = std::io::Cursor::new(v);
     write_request_header(r, &mut c).unwrap();
+    c.into_inner()
+}
+
+/// Easy version of `write_response_header`.
+/// See its doc for details
+/// Panics on problems
+pub fn response_header_to_vec<T>(r: &http::Response<T>) -> Vec<u8> {
+    let v = Vec::with_capacity(120);
+    let mut c = std::io::Cursor::new(v);
+    write_response_header(r, &mut c).unwrap();
     c.into_inner()
 }
 
@@ -311,6 +360,30 @@ qwer";
             "get /bernd http/1.1\r
 host: lol\r
 authorization: basic zm9vomjhcg==\r
+\r\n"
+                .as_ref()
+        );
+    }
+
+
+    #[test]
+    fn response_roundtrip() {
+        let q = b"HTTP/1.1 200 OK\r
+Host: lol\r
+Server: none\r
+\r
+qwer";
+        let (r, rest) = parse_response_header_easy(q).unwrap().unwrap();
+
+        assert_eq!(rest, b"qwer");
+
+        let v = response_header_to_vec(&r);
+        let vv = String::from_utf8_lossy(&v[..]).to_lowercase();
+        assert_eq!(
+            vv,
+            "http/1.1 200 ok\r
+host: lol\r
+server: none\r
 \r\n"
                 .as_ref()
         );
