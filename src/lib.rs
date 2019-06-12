@@ -23,28 +23,51 @@ pub enum Error {
     StatusCode(http::status::InvalidStatusCode),
 }
 
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Error::Parse(x) => x.fmt(f),
+            Error::Path(x) => x.fmt(f),
+            Error::HeaderName(x) => x.fmt(f),
+            Error::HeaderValue(x) => x.fmt(f),
+            Error::StatusCode(x) => x.fmt(f),
+        }
+    }
+}
+impl std::error::Error for Error {
+    fn cause(&self) -> Option<&dyn std::error::Error> {
+        Some(match self {
+            Error::Parse(x) => x,
+            Error::Path(x) => x,
+            Error::HeaderName(x) => x,
+            Error::HeaderValue(x) => x,
+            Error::StatusCode(x) => x,
+        })
+    }
+}
+
 use std::str::FromStr;
 
 
 /// Parse this byte buffer into a `Request` plus remaining trailing bytes.
 /// Returns `Ok(None)` if not enough bytes yet to produce a complete request.
 /// Allocates a space for 50 headers (about 800 bytes) in stack each time.
-pub fn parse_request_easy(buf: &[u8]) -> Result<Option<(Request, &[u8])>, Error> {
+pub fn parse_request_header_easy(buf: &[u8]) -> Result<Option<(Request, &[u8])>, Error> {
     let mut h = [httparse::EMPTY_HEADER; 50];
-    parse_request(buf, h.as_mut())
+    parse_request_header(buf, h.as_mut())
 }
 
 /// Parse this byte buffer into a `Response` plus remaining trailing bytes.
 /// Returns `Ok(None)` if not enough bytes yet to produce a complete response.
 /// Allocates a space for 50 headers (about 800 bytes) in stack each time.
-pub fn parse_response_easy(buf: &[u8]) -> Result<Option<(Response, &[u8])>, Error> {
+pub fn parse_response_header_easy(buf: &[u8]) -> Result<Option<(Response, &[u8])>, Error> {
     let mut h = [httparse::EMPTY_HEADER; 50];
-    parse_response(buf, h.as_mut())
+    parse_response_header(buf, h.as_mut())
 }
 
 /// Parse this byte buffer into a `Request` plus remaining trailing bytes.
 /// Returns `Ok(None)` if not enough bytes yet to produce a complete request.
-pub fn parse_request<'a,'b>(
+pub fn parse_request_header<'a,'b>(
     buf: &'a[u8],
     headers_buffer: &'b mut [httparse::Header<'a>],
 ) -> Result<Option<(Request, &'a[u8])>, Error> {
@@ -70,7 +93,7 @@ pub fn parse_request<'a,'b>(
 
 /// Parse this byte buffer into a `Response` plus remaining trailing bytes.
 /// Returns `Ok(None)` if not enough bytes yet to produce a complete response.
-pub fn parse_response<'a,'b>(
+pub fn parse_response_header<'a,'b>(
     buf: &'a[u8],
     headers_buffer: &'b mut [httparse::Header<'a>],
 ) -> Result<Option<(Response, &'a[u8])>, Error> {
@@ -92,10 +115,87 @@ pub fn parse_response<'a,'b>(
     Ok(Some((r, trailer)))
 }
 
+fn io_other_error(msg: &'static str) -> std::io::Error {
+    let e : Box<dyn std::error::Error + Send + Sync + 'static> = msg.into();
+    std::io::Error::new(std::io::ErrorKind::Other, e)
+}
+
+/// Write request line and headers (but not body) of this HTTP 1.1 request
+/// May add 'Host:' header automatically
+/// Returns number of bytes written
+/// 
+/// It is recommended to use either BufWriter or Cursor for efficiency
+/// 
+/// Scheme and version `Request` fields are ignored
+pub fn write_request_header<T>(r: &http::Request<T>, mut io: impl std::io::Write) -> std::io::Result<usize> {
+    let mut len = 0;
+    let verb = r.method().as_str();
+    let path = r.uri().path_and_query().ok_or_else(||io_other_error("Invalid URI"))?;
+    let mut need_to_insert_host = r.uri().host().is_some();
+    if r.headers().contains_key(http::header::HOST) {
+        need_to_insert_host = false;
+    }
+    macro_rules! w {
+        ($x:expr) => {
+            io.write_all($x)?;
+            len += $x.len();
+        }
+    }
+    w!(verb.as_bytes()); 
+    w!(b" "); 
+    w!(path.as_str().as_bytes());
+    w!(b" HTTP/1.1\r\n");
+
+    if need_to_insert_host {
+        w!(b"Host: ");
+        let host = r.uri().host().unwrap();
+        w!(host.as_bytes());
+        if let Some(p) = r.uri().port_part() {
+            w!(b":");
+            w!(p.as_str().as_bytes());
+        }
+        w!(b"\r\n");
+    }
+
+    for (hn, hv) in r.headers() {
+        w!(hn.as_str().as_bytes());
+        w!(b": ");
+        w!(hv.as_bytes());
+        w!(b"\r\n");
+    }
+
+    w!(b"\r\n");
+
+    Ok(len)
+}
+
+/// Easy version of `write_request_header`.
+/// See its doc for details
+/// Panics on problems
+pub fn request_header_to_vec(r:&Request) -> Vec<u8> {
+    let v = Vec::with_capacity(120);
+    let mut c = std::io::Cursor::new(v);
+    write_request_header(r, &mut c).unwrap();
+    c.into_inner()
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
     #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+    fn request_roundtrip() {
+        let q = b"GET / HTTP/1.1\r
+Host: lol\r
+User-Agent: none\r
+\r
+qwer";
+        let (r, rest) = parse_request_header_easy(q).unwrap().unwrap();
+        assert_eq!(rest, b"qwer");
+        let v = request_header_to_vec(&r);
+        let vv = String::from_utf8_lossy(&v[..]).to_lowercase();
+        assert_eq!(vv, "get / http/1.1\r
+host: lol\r
+user-agent: none\r
+\r\n".as_ref());
     }
 }
