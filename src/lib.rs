@@ -1,10 +1,18 @@
-//! Adaptor between `httparse` and `http` crates.
+//! Some ways to define this crate:
+//! 
+//! * Adaptor between `httparse` and `http` crates.
+//! * Super-lowlevel web framework, almost minimal one around `http` crate.
+//! * A way to turn bytes to/from HTTP request/responses
+//! 
 //! HTTP 1 only, no HTTP 2.
-//! Also contains code to go from `Request` or `Response` back to bytes.
 //!
-//! Never goes into request or response body, it always leave it unparsed.
-//!
-//! Not performance-optimized
+//! Body is not touched in any way. Not performance-optimized.
+//! Request handling code tries to to Basic Authorization (can opt out).
+//! 
+//! Supports Rust 1.28.0
+
+#![deny(missing_docs)]
+#![forbid(unsafe_code)]
 
 extern crate bytes;
 pub extern crate http;
@@ -13,13 +21,21 @@ extern crate httparse;
 #[cfg(feature = "basicauth")]
 extern crate base64;
 
+/// `http`'s request variant as used by the parser part of this crate.
 pub type Request = http::request::Request<()>;
+/// `http`'s response variant as used by the parser part of this crate.
 pub type Response = http::response::Response<()>;
 
 pub use httparse::EMPTY_HEADER;
 
+/// Error handling for this crate
+/// 
+/// All errors originate from dependency crates
 #[derive(Debug)]
+#[allow(missing_docs)]
 pub enum Error {
+    /// Notable error case that may need to be
+    /// handled is `httparse::Error::TooManyHeaders`
     Parse(httparse::Error),
     Path(http::uri::InvalidUri),
     HeaderName(http::header::InvalidHeaderName),
@@ -27,6 +43,7 @@ pub enum Error {
     StatusCode(http::status::InvalidStatusCode),
     InvalidAuthority(http::uri::InvalidUriBytes),
     #[cfg(feature = "basicauth")]
+    /// If `basicauth` cargo feature is enabled, this variant is absent
     BasicAuth(base64::DecodeError),
 }
 
@@ -67,6 +84,12 @@ use std::str::FromStr;
 /// Parse this byte buffer into a `Request` plus remaining trailing bytes.
 /// Returns `Ok(None)` if not enough bytes yet to produce a complete request.
 /// Allocates a space for 50 headers (about 800 bytes) in stack each time.
+/// 
+/// ```rust
+/// let (r, _b) = http_bytes::parse_request_header_easy(b"GET / HTTP/1.0\r\n\r\n").unwrap().unwrap();
+/// assert_eq!(r.method(), http_bytes::http::method::Method::GET);
+/// assert_eq!(r.uri(), &"/".parse::<http_bytes::http::uri::Uri>().unwrap());
+/// ```
 pub fn parse_request_header_easy(buf: &[u8]) -> Result<Option<(Request, &[u8])>, Error> {
     let mut h = [httparse::EMPTY_HEADER; 50];
     parse_request_header(buf, h.as_mut(), None)
@@ -75,6 +98,10 @@ pub fn parse_request_header_easy(buf: &[u8]) -> Result<Option<(Request, &[u8])>,
 /// Parse this byte buffer into a `Response` plus remaining trailing bytes.
 /// Returns `Ok(None)` if not enough bytes yet to produce a complete response.
 /// Allocates a space for 50 headers (about 800 bytes) in stack each time.
+/// ```rust
+/// let (r, _b) = http_bytes::parse_response_header_easy(b"HTTP/1.0 200 OK\r\n\r\n").unwrap().unwrap();
+/// assert_eq!(r.status(), http_bytes::http::StatusCode::OK);
+/// ```
 pub fn parse_response_header_easy(buf: &[u8]) -> Result<Option<(Response, &[u8])>, Error> {
     let mut h = [httparse::EMPTY_HEADER; 50];
     parse_response_header(buf, h.as_mut())
@@ -83,6 +110,9 @@ pub fn parse_response_header_easy(buf: &[u8]) -> Result<Option<(Response, &[u8])
 /// Parse this byte buffer into a `Request` plus remaining trailing bytes.
 ///
 /// Returns `Ok(None)` if not enough bytes yet to produce a complete request.
+/// 
+/// If you need to get request header length, subtract length of returned buffer
+/// from length of original buffer.
 ///
 /// If `scheme` is specified then information from `Host:`
 /// header is filled in into URI, if it exists. In case of no
@@ -91,6 +121,27 @@ pub fn parse_response_header_easy(buf: &[u8]) -> Result<Option<(Response, &[u8])
 /// If default Cargo feature `basicauth` is enabled and
 /// `Authorization: Basic` HTTP header is found, it is also filled in
 /// into URI, if there is schema and host.
+/// 
+///
+/// ```rust
+/// let mut headers_buffer = vec![http_bytes::EMPTY_HEADER; 20];
+/// let (r, b) = http_bytes::parse_request_header(
+///     b"GET /ololo HTTP/1.1\r\n\
+///       Host: example.com\r\n\
+///       Authorization: Basic cm1zOnJtcw==\r\n\
+///       user-agent: unittest\r\n\
+///       \r\n",
+///     &mut headers_buffer[..],
+///     Some(http_bytes::http::uri::Scheme::HTTP),
+/// ).unwrap().unwrap();
+/// assert_eq!(b, b"");
+/// assert_eq!(r.method(), http_bytes::http::method::Method::GET);
+/// let mut u = "http://example.com/ololo";
+/// #[cfg(feature="basicauth")] { u = "http://rms:rms@example.com/ololo"; }
+/// assert_eq!(r.uri(), &u.parse::<http_bytes::http::uri::Uri>().unwrap());
+/// assert_eq!(r.headers().get(http_bytes::http::header::USER_AGENT),
+///     Some(&http_bytes::http::header::HeaderValue::from_str("unittest").unwrap()));
+/// ```
 pub fn parse_request_header<'a, 'b>(
     buf: &'a [u8],
     headers_buffer: &'b mut [httparse::Header<'a>],
@@ -152,7 +203,27 @@ pub fn parse_request_header<'a, 'b>(
 }
 
 /// Parse this byte buffer into a `Response` plus remaining trailing bytes.
+/// 
 /// Returns `Ok(None)` if not enough bytes yet to produce a complete response.
+/// 
+/// If you need to get response header length, subtract length of returned buffer
+/// from length of original buffer.
+/// 
+/// ```rust
+/// let mut headers_buffer = vec![http_bytes::EMPTY_HEADER; 20];
+/// let (r, b) = http_bytes::parse_response_header(
+///     b"HTTP/1.1 200 OK\r\n\
+///       Host: example.com\r\n\
+///       Content-Type: text/plain\r\n\
+///       \r\n\
+///       Hello, world\n",
+///     &mut headers_buffer[..],
+/// ).unwrap().unwrap();
+/// assert_eq!(b, b"Hello, world\n");
+/// assert_eq!(r.status(), http_bytes::http::StatusCode::OK);
+/// assert_eq!(r.headers().get(http_bytes::http::header::CONTENT_TYPE),
+///     Some(&http_bytes::http::header::HeaderValue::from_str("text/plain").unwrap()));
+/// ```
 pub fn parse_response_header<'a, 'b>(
     buf: &'a [u8],
     headers_buffer: &'b mut [httparse::Header<'a>],

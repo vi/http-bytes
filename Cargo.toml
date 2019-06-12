@@ -2,7 +2,12 @@
 name = "http-bytes"
 version = "0.1.0"
 authors = ["Vitaly _Vi Shukela <vi0oss@gmail.com>"]
-edition = "2018"
+repository = "https://github.com/vi/http-bytes"
+description = "Byte buffer to/from http::{Request,Response}"
+keywords = ["http", "bytes", "parser", "httpparse"]
+categories = ["encoding", "network-programming", "web-programming"]
+license = "MIT/Apache-2.0"
+#msrv = "1.28.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -15,3 +20,6 @@ base64 = { version = "0.10.1", optional = true }
 [features]
 default = ["basicauth"]
 basicauth = ["base64"]
+
+[badges]
+travis-ci = { repository = "vi/http-bytes", branch = "master" }
