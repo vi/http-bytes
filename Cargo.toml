@@ -23,3 +23,7 @@ basicauth = ["base64"]
 
 [badges]
 travis-ci = { repository = "vi/http-bytes", branch = "master" }
+
+[dev-dependencies]
+proptest = "0.9.4"
+proptest-http = "0.1.0"
