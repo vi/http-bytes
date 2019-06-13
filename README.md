@@ -1,4 +1,4 @@
-[![Build Status](https://travis-ci.org/vi/http-bytes.svg?branch=master)](https://travis-ci.com/vi/http-bytes)
+[![Build Status](https://travis-ci.com/vi/http-bytes.svg?branch=master)](https://travis-ci.com/vi/http-bytes)
 
 # http-bytes
 
