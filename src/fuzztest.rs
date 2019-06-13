@@ -66,9 +66,19 @@ fn compare_requests(a: &super::Request, b:&super::Request) -> bool {
             return false;
         }
     } else {
-        if a.uri() != b.uri() {
-            eprintln!("URI mismatch: {} vs {}", a.uri(), b.uri());
-            return false;
+        #[cfg(feature="basicauth")] {
+            if a.uri() != b.uri() {
+                eprintln!("URI mismatch: {} vs {}", a.uri(), b.uri());
+                return false;
+            }
+        }
+        #[cfg(not(feature="basicauth"))] {
+            if a.uri().path_and_query() != b.uri().path_and_query() ||
+               a.uri().host() != b.uri().host() ||
+               a.uri().port_part() != b.uri().port_part() {
+                eprintln!("URI mismatch: {} vs {}", a.uri(), b.uri());
+                return false;
+            }
         }
     }
     true
