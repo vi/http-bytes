@@ -107,10 +107,12 @@ fn serve_client(mut c: &std::net::TcpStream) -> Result<()> {
     loop {
         let ret = c.read(&mut buf[fill_meter..])?;
 
-        let b = &buf[0..(fill_meter + ret)];
-        let ret2 = http_bytes::parse_request_header_easy(b)?;
-        if let Some(rr) = ret2 {
-            return handle_client_request(c, rr.0, rr.1);
+        {
+            let b = &buf[0..(fill_meter + ret)];
+            let ret2 = http_bytes::parse_request_header_easy(b)?;
+            if let Some(rr) = ret2 {
+                return handle_client_request(c, rr.0, rr.1);
+            }
         }
 
         fill_meter += ret;
