@@ -1,14 +1,14 @@
 //! Some ways to define this crate:
-//! 
+//!
 //! * Adaptor between `httparse` and `http` crates.
 //! * Super-lowlevel web framework, almost minimal one around `http` crate.
 //! * A way to make bytes to/from HTTP request/responses
-//! 
+//!
 //! HTTP 1 only, no HTTP 2.
 //!
 //! Body is not touched in any way. Not performance-optimized.
 //! Request handling code tries to to Basic Authorization (can opt out).
-//! 
+//!
 //! Supports Rust 1.28.0
 
 #![deny(missing_docs)]
@@ -31,7 +31,7 @@ pub type Response = http::response::Response<()>;
 pub use httparse::EMPTY_HEADER;
 
 /// Error handling for this crate
-/// 
+///
 /// All errors originate from dependency crates
 #[derive(Debug)]
 #[allow(missing_docs)]
@@ -86,7 +86,7 @@ use std::str::FromStr;
 /// Parse this byte buffer into a `Request` plus remaining trailing bytes.
 /// Returns `Ok(None)` if not enough bytes yet to produce a complete request.
 /// Allocates a space for 50 headers (about 800 bytes) in stack each time.
-/// 
+///
 /// ```rust
 /// let (r, _b) = http_bytes::parse_request_header_easy(b"GET / HTTP/1.0\r\n\r\n").unwrap().unwrap();
 /// assert_eq!(r.method(), http_bytes::http::method::Method::GET);
@@ -112,7 +112,7 @@ pub fn parse_response_header_easy(buf: &[u8]) -> Result<Option<(Response, &[u8])
 /// Parse this byte buffer into a `Request` plus remaining trailing bytes.
 ///
 /// Returns `Ok(None)` if not enough bytes yet to produce a complete request.
-/// 
+///
 /// If you need to get request header length, subtract length of returned buffer
 /// from length of original buffer.
 ///
@@ -123,7 +123,7 @@ pub fn parse_response_header_easy(buf: &[u8]) -> Result<Option<(Response, &[u8])
 /// If default Cargo feature `basicauth` is enabled and
 /// `Authorization: Basic` HTTP header is found, it is also filled in
 /// into URI, if there is schema and host.
-/// 
+///
 ///
 /// ```rust
 /// let mut headers_buffer = vec![http_bytes::EMPTY_HEADER; 20];
@@ -149,45 +149,48 @@ pub fn parse_request_header<'a, 'b>(
     headers_buffer: &'b mut [httparse::Header<'a>],
     scheme: Option<http::uri::Scheme>,
 ) -> Result<Option<(Request, &'a [u8])>, Error> {
-    let mut x = httparse::Request::new(headers_buffer);
-    let n = match x.parse(buf).map_err(Error::Parse)? {
+    let mut parsed_request = httparse::Request::new(headers_buffer);
+    let header_size = match parsed_request.parse(buf).map_err(Error::Parse)? {
         httparse::Status::Partial => return Ok(None),
         httparse::Status::Complete(size) => size,
     };
-    let trailer = &buf[n..];
-    let mut r = Request::new(());
-    *r.method_mut() =
-        Method::from_str(x.method.unwrap()).map_err(|_| Error::Parse(httparse::Error::Token))?;
-    *r.version_mut() = http::Version::HTTP_11; // FIXME?
+    let trailer = &buf[header_size..];
+    let mut request = Request::new(());
+    *request.method_mut() = Method::from_str(parsed_request.method.unwrap())
+        .map_err(|_| Error::Parse(httparse::Error::Token))?;
+    *request.version_mut() = http::Version::HTTP_11; // FIXME?
     let mut up: UriParts = Default::default();
-    up.path_and_query = Some(PathAndQuery::from_str(x.path.unwrap()).map_err(Error::Path)?);
+    up.path_and_query =
+        Some(PathAndQuery::from_str(parsed_request.path.unwrap()).map_err(Error::Path)?);
 
-    for h in x.headers {
-        let n = HeaderName::from_str(h.name).map_err(Error::HeaderName)?;
-        let v = HeaderValue::from_bytes(h.value).map_err(Error::HeaderValue)?;
-        r.headers_mut().append(n, v);
+    for header in parsed_request.headers {
+        let n = HeaderName::from_str(header.name).map_err(Error::HeaderName)?;
+        let v = HeaderValue::from_bytes(header.value).map_err(Error::HeaderValue)?;
+        request.headers_mut().append(n, v);
     }
     if scheme.is_some() {
-        if let Some(h) = r.headers().get(HOST) {
+        if let Some(hv) = request.headers().get(HOST) {
             up.scheme = scheme;
-            let authority_buf = bytes::Bytes::from(h.as_bytes());
+            let authority_buf = bytes::Bytes::from(hv.as_bytes());
             #[allow(unused_mut)]
             let mut authority_buf = authority_buf;
             #[cfg(feature = "basicauth")]
             {
+                use percent_encoding::{percent_encode, USERINFO_ENCODE_SET};
                 use std::io::Write;
-                use percent_encoding::{percent_encode,USERINFO_ENCODE_SET};
 
-                #[derive(Clone,Copy)]
+                #[derive(Clone, Copy)]
                 struct CorrectedUserinfoEncodeSet;
                 impl percent_encoding::EncodeSet for CorrectedUserinfoEncodeSet {
                     fn contains(&self, byte: u8) -> bool {
-                        if byte == b'%' { return true; }
+                        if byte == b'%' {
+                            return true;
+                        }
                         USERINFO_ENCODE_SET.contains(byte)
                     }
                 }
 
-                if let Some(u) = r.headers().get(http::header::AUTHORIZATION) {
+                if let Some(u) = request.headers().get(http::header::AUTHORIZATION) {
                     let u = u.as_bytes();
                     let mut b = false;
                     b |= u.starts_with(b"Basic ");
@@ -199,18 +202,17 @@ pub fn parse_request_header<'a, 'b>(
 
                         // percent-encode
                         let u = u[..]
-                            .split(|v|*v==b':')
-                            .map(|v|percent_encode(v, CorrectedUserinfoEncodeSet).to_string())
+                            .split(|v| *v == b':')
+                            .map(|v| percent_encode(v, CorrectedUserinfoEncodeSet).to_string())
                             .collect::<Vec<_>>()
                             .join(":")
                             .into_bytes();
-                        
                         // Prepend `user:password@` to variable `authbuf` above.
                         // Without pulling in std::fmt preferrably
                         let l = u.len();
                         let mut u = std::io::Cursor::new(u);
                         u.set_position(l as u64);
-                        u.write(b"@").unwrap();
+                        u.write_all(b"@").unwrap();
                         u.write_all(authority_buf.as_ref()).unwrap();
                         authority_buf = bytes::Bytes::from(u.into_inner());
                     }
@@ -220,17 +222,17 @@ pub fn parse_request_header<'a, 'b>(
             up.authority = Some(a);
         }
     }
-    *r.uri_mut() = http::Uri::from_parts(up).unwrap();
-    Ok(Some((r, trailer)))
+    *request.uri_mut() = http::Uri::from_parts(up).unwrap();
+    Ok(Some((request, trailer)))
 }
 
 /// Parse this byte buffer into a `Response` plus remaining trailing bytes.
-/// 
+///
 /// Returns `Ok(None)` if not enough bytes yet to produce a complete response.
-/// 
+///
 /// If you need to get response header length, subtract length of returned buffer
 /// from length of original buffer.
-/// 
+///
 /// ```rust
 /// let mut headers_buffer = vec![http_bytes::EMPTY_HEADER; 20];
 /// let (r, b) = http_bytes::parse_response_header(
@@ -294,10 +296,9 @@ pub fn write_request_header<T>(
         .uri()
         .path_and_query()
         .ok_or_else(|| io_other_error("Invalid URI"))?;
-    let mut need_to_insert_host = r.uri().host().is_some();
-    if r.headers().contains_key(HOST) {
-        need_to_insert_host = false;
-    }
+
+    let need_to_insert_host = r.uri().host().is_some() && !r.headers().contains_key(HOST);
+
     macro_rules! w {
         ($x:expr) => {
             io.write_all($x)?;
@@ -319,17 +320,21 @@ pub fn write_request_header<T>(
         }
         w!(b"\r\n");
     }
-    #[cfg(feature = "basicauth")] {
+    #[cfg(feature = "basicauth")]
+    {
         let already_present = r.headers().get(http::header::AUTHORIZATION).is_some();
-        let at_sign = r.uri().authority_part().map_or(false, |x|x.as_str().contains('@'));
+        let at_sign = r
+            .uri()
+            .authority_part()
+            .map_or(false, |x| x.as_str().contains('@'));
         if !already_present && at_sign {
             w!(b"Authorization: Basic ");
             let a = r.uri().authority_part().unwrap().as_str();
             let a = &a[0..(a.find('@').unwrap())];
             let a = a
                 .as_bytes()
-                .split(|v|*v==b':')
-                .map(|v|percent_encoding::percent_decode(v).collect::<Vec<u8>>())
+                .split(|v| *v == b':')
+                .map(|v| percent_encoding::percent_decode(v).collect::<Vec<u8>>())
                 .collect::<Vec<Vec<u8>>>()
                 .join(&b':');
             let a = base64::encode(&a);
@@ -351,7 +356,7 @@ pub fn write_request_header<T>(
 }
 
 /// Write response line and headers (but not body) of this HTTP 1.1 response
-/// 
+///
 /// Returns number of bytes written
 ///
 /// It is recommended to use either BufWriter or Cursor for efficiency
@@ -410,6 +415,6 @@ pub fn response_header_to_vec<T>(r: &http::Response<T>) -> Vec<u8> {
 }
 
 #[cfg(test)]
-mod test;
-#[cfg(test)]
 mod fuzztest;
+#[cfg(test)]
+mod test;
