@@ -16,10 +16,11 @@ http = "0.1.17"
 httparse = "1.3.3"
 bytes = "0.4.12"
 base64 = { version = "0.10.1", optional = true }
+percent-encoding = { version = "1.0.1", optional = true }
 
 [features]
 default = ["basicauth"]
-basicauth = ["base64"]
+basicauth = ["base64", "percent-encoding"]
 
 [badges]
 travis-ci = { repository = "vi/http-bytes", branch = "master" }

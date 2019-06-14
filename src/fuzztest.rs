@@ -67,7 +67,9 @@ fn compare_requests(a: &super::Request, b:&super::Request) -> bool {
         }
     } else {
         #[cfg(feature="basicauth")] {
-            if a.uri() != b.uri() {
+            let pda : Vec<u8> = percent_encoding::percent_decode(a.uri().to_string().as_bytes()).collect();
+            let pdb : Vec<u8> = percent_encoding::percent_decode(b.uri().to_string().as_bytes()).collect();
+            if pda != pdb {
                 eprintln!("URI mismatch: {} vs {}", a.uri(), b.uri());
                 return false;
             }

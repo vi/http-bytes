@@ -20,6 +20,8 @@ extern crate httparse;
 
 #[cfg(feature = "basicauth")]
 extern crate base64;
+#[cfg(feature = "basicauth")]
+extern crate percent_encoding;
 
 /// `http`'s request variant as used by the parser part of this crate.
 pub type Request = http::request::Request<()>;
@@ -174,6 +176,17 @@ pub fn parse_request_header<'a, 'b>(
             #[cfg(feature = "basicauth")]
             {
                 use std::io::Write;
+                use percent_encoding::{percent_encode,USERINFO_ENCODE_SET};
+
+                #[derive(Clone,Copy)]
+                struct CorrectedUserinfoEncodeSet;
+                impl percent_encoding::EncodeSet for CorrectedUserinfoEncodeSet {
+                    fn contains(&self, byte: u8) -> bool {
+                        if byte == b'%' { return true; }
+                        USERINFO_ENCODE_SET.contains(byte)
+                    }
+                }
+
                 if let Some(u) = r.headers().get(http::header::AUTHORIZATION) {
                     let u = u.as_bytes();
                     let mut b = false;
@@ -183,6 +196,15 @@ pub fn parse_request_header<'a, 'b>(
                     if b && u.len() > 8 {
                         let u = &u[6..];
                         let u = base64::decode(u).map_err(Error::BasicAuth)?;
+
+                        // percent-encode
+                        let u = u[..]
+                            .split(|v|*v==b':')
+                            .map(|v|percent_encode(v, CorrectedUserinfoEncodeSet).to_string())
+                            .collect::<Vec<_>>()
+                            .join(":")
+                            .into_bytes();
+                        
                         // Prepend `user:password@` to variable `authbuf` above.
                         // Without pulling in std::fmt preferrably
                         let l = u.len();
@@ -304,7 +326,13 @@ pub fn write_request_header<T>(
             w!(b"Authorization: Basic ");
             let a = r.uri().authority_part().unwrap().as_str();
             let a = &a[0..(a.find('@').unwrap())];
-            let a = base64::encode(a);
+            let a = a
+                .as_bytes()
+                .split(|v|*v==b':')
+                .map(|v|percent_encoding::percent_decode(v).collect::<Vec<u8>>())
+                .collect::<Vec<Vec<u8>>>()
+                .join(&b':');
+            let a = base64::encode(&a);
             w!(a.as_bytes());
             w!(b"\r\n");
         }
