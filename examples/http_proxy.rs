@@ -1,3 +1,4 @@
+extern crate http;
 extern crate http_bytes;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -10,27 +11,48 @@ fn data_transfer(mut a: &std::net::TcpStream, mut b: &std::net::TcpStream) {
     let _ = b.shutdown(std::net::Shutdown::Write);
 }
 
+fn data_transfer_bidirectional(a: &std::net::TcpStream, b: &std::net::TcpStream) -> Result<()> {
+    let aa = a.try_clone()?; // needed to avoid crossbeam and friends
+    let bb = b.try_clone()?; // this causes double FD usage although
+    std::thread::spawn(move || data_transfer(&bb, &aa));
+    data_transfer(a, b);
+    Ok(())
+}
+
+fn handle_connect_request(
+    mut c: &std::net::TcpStream,
+    mut s: std::net::TcpStream,
+    debt: &[u8],
+) -> Result<()> {
+    // We already connected to the server, so just need to reply with success
+    // And go on connecting
+
+    let response = http::Response::builder().body(())?; // 200 OK
+    let response = http_bytes::response_header_to_vec(&response);
+    c.write_all(&response[..])?;
+
+    s.write_all(debt)?;
+    data_transfer_bidirectional(c, &s)?;
+
+    Ok(())
+}
+
 fn propagate_request_to_server(
     c: &std::net::TcpStream,
     mut s: std::net::TcpStream,
     request: http_bytes::Request,
     debt: &[u8],
 ) -> Result<()> {
-
-    let c2 = c.try_clone()?; // needed to avoid crossbeam and friends
-    let s2 = s.try_clone()?; // this causes double FD usage although
+    if request.method() == http::method::Method::CONNECT {
+        return handle_connect_request(c, s, debt);
+    }
 
     let request_header = http_bytes::request_header_to_vec(&request);
 
     s.write_all(&request_header[..])?;
+
     s.write_all(debt)?;
-
-    // Now just to the port forwarding. No errors should be thrown past this point.
-
-    std::thread::spawn(move || {
-        data_transfer(&s2, &c2)
-    });
-    data_transfer(c, &s);
+    data_transfer_bidirectional(c, &s)?;
 
     Ok(())
 }
@@ -45,8 +67,11 @@ fn handle_client_request(
 
     let authority = if let Some(aut) = request.uri().authority_part() {
         aut.clone()
-    } else if let Some(hh) = request.headers().get(http_bytes::http::header::HOST) {
+    } else if let Some(hh) = request.headers().get(http::header::HOST) {
         let aut = hh.to_str()?;
+        aut.parse()?
+    } else if request.method() == http::method::Method::CONNECT {
+        let aut = request.uri().to_string();
         aut.parse()?
     } else {
         return Err("No host specified to connect to\n")?;
