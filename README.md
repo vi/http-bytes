@@ -6,7 +6,7 @@ Some ways to define this crate:
 
 * Adaptor between `httparse` and `http` crates.
 * Super-lowlevel web framework, almost minimal one around `http` crate.
-* A way to turn bytes to/from HTTP request/responses
+* A way to turn byte buffers to/from HTTP request/response headers
 
 HTTP 1 only, no HTTP 2.
 
